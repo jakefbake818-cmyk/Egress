@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Sealed Arena</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            background: #0a0e1a;
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        
+        #gameContainer {
+            position: relative;
+            width: 800px;
+            height: 600px;
+        }
+        
+        canvas {
+            border: 2px solid #1a2332;
+            background: #0f1419;
+            display: block;
+            box-shadow: 0 0 40px rgba(0, 100, 200, 0.3);
+        }
+        
+        #narrative {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #6b9cc4;
+            font-size: 14px;
+            text-align: center;
+            width: 90%;
+            text-shadow: 0 0 10px rgba(107, 156, 196, 0.5);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 1s;
+        }
+        
+        #narrative.show {
+            opacity: 1;
+        }
+        
+        #controls {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #4a5c73;
+            font-size: 11px;
+            text-align: center;
+        }
+        
+        #deathCounter {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            color: #3d4a5c;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <canvas id="gameCanvas" width="800" height="600"></canvas>
+        <div id="narrative"></div>
+        <div id="controls">WASD/Arrows: Move | SPACE: Dodge | Click: Attack</div>
+        <div id="deathCounter">Attempts: <span id="attempts">0</span></div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const narrativeEl = document.getElementById('narrative');
+        const attemptsEl = document.getElementById('attempts');
+        
+        // Audio context for music
+        let audioContext;
+        let ambientOscillator, tensionOscillator, gainNode, tensionGain;
+        
+        function initAudio() {
+            if (audioContext) return;
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            
+            // Ambient drone
+            ambientOscillator = audioContext.createOscillator();
+            ambientOscillator.type = 'sine';
+            ambientOscillator.frequency.setValueAtTime(55, audioContext.currentTime); // Low A
+            
+            gainNode = audioContext.createGain();
+            gainNode.gain.setValueAtTime(0.08, audioContext.currentTime);
+            
+            ambientOscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            ambientOscillator.start();
+            
+            // Tension layer
+            tensionOscillator = audioContext.createOscillator();
+            tensionOscillator.type = 'sawtooth';
+            tensionOscillator.frequency.setValueAtTime(110, audioContext.currentTime);
+            
+            tensionGain = audioContext.createGain();
+            tensionGain.gain.setValueAtTime(0, audioContext.currentTime);
+            
+            tensionOscillator.connect(tensionGain);
+            tensionGain.connect(audioContext.destination);
+            tensionOscillator.start();
+        }
+        
+        function setTension(level) {
+            if (!audioContext) return;
+            const now = audioContext.currentTime;
+            tensionGain.gain.linearRampToValueAtTime(level * 0.05, now + 0.5);
+        }
+        
+        // Game state
+        let gameState = {
+            attempts: 0,
+            phase: 'start', // start, fighting, dead, victory
+            environmentVariant: 0
+        };
+        
+        // Player
+        let player = {
+            x: 400,
+            y: 500,
+            radius: 12,
+            speed: 3,
+            hp: 100,
+            maxHp: 100,
+            dodging: false,
+            dodgeCooldown: 0,
+            dodgeDuration: 0,
+            facing: 0 // angle
+        };
+        
+        // Boss
+        let boss = {
+            x: 400,
+            y: 150,
+            radius: 40,
+            hp: 300,
+            maxHp: 300,
+            phase: 1,
+            attackTimer: 0,
+            attackCooldown: 120,
+            pattern: 0,
+            pulsePhase: 0
+        };
+        
+        // Projectiles
+        let projectiles = [];
+        let playerAttacks = [];
+        
+        // Keys
+        let keys = {};
+        let mouse = { x: 0, y: 0, clicked: false };
+        
+        // Narratives that change with attempts
+        const narratives = [
+            "You open your eyes. The arena is sealed. There is only the fight.",
+            "Again. The walls feel closer than before.",
+            "You remember this moment. You've been here before.",
+            "The patterns are becoming clearer. You're learning.",
+            "How many times now? The echo of past failures lingers.",
+            "The boss shifts slightly. It remembers you too.",
+            "Time feels different here. Thicker. Heavier.",
+            "You notice cracks in the walls you hadn't seen before.",
+            "Your movements are sharper. Muscle memory from lives unlived.",
+            "The arena hums with a frequency you're beginning to understand.",
+            "Perhaps this is the lesson: to try, and try again.",
+            "You are not the same person who first entered this place."
+        ];
+        
+        const defeatTexts = [
+            "You fall. Everything fades.",
+            "Darkness claims you once more.",
+            "The cycle continues.",
+            "Not yet. But closer.",
+            "You see the pattern now, in your last moments.",
+            "Another attempt ends. Another begins."
+        ];
+        
+        // Event listeners
+        document.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+            if (e.code === 'Space') {
+                e.preventDefault();
+                dodge();
+            }
+        });
+        
+        document.addEventListener('keyup', (e) => {
+            keys[e.key.toLowerCase()] = false;
+        });
+        
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            mouse.x = e.clientX - rect.left;
+            mouse.y = e.clientY - rect.top;
+        });
+        
+        canvas.addEventListener('click', (e) => {
+            initAudio();
+            if (gameState.phase === 'start') {
+                startFight();
+            } else if (gameState.phase === 'fighting') {
+                playerAttack();
+            } else if (gameState.phase === 'dead' || gameState.phase === 'victory') {
+                reset();
+            }
+        });
+        
+        function startFight() {
+            gameState.phase = 'fighting';
+            setTension(0.3);
+            hideNarrative();
+        }
+        
+        function showNarrative(text) {
+            narrativeEl.textContent = text;
+            narrativeEl.classList.add('show');
+        }
+        
+        function hideNarrative() {
+            narrativeEl.classList.remove('show');
+        }
+        
+        function dodge() {
+            if (gameState.phase !== 'fighting') return;
+            if (player.dodgeCooldown <= 0) {
+                player.dodging = true;
+                player.dodgeDuration = 20;
+                player.dodgeCooldown = 60;
+            }
+        }
+        
+        function playerAttack() {
+            if (gameState.phase !== 'fighting') return;
+            const angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+            playerAttacks.push({
+                x: player.x,
+                y: player.y,
+                vx: Math.cos(angle) * 8,
+                vy: Math.sin(angle) * 8,
+                radius: 5
+            });
+        }
+        
+        function updatePlayer() {
+            // Movement
+            let dx = 0, dy = 0;
+            if (keys['w'] || keys['arrowup']) dy -= 1;
+            if (keys['s'] || keys['arrowdown']) dy += 1;
+            if (keys['a'] || keys['arrowleft']) dx -= 1;
+            if (keys['d'] || keys['arrowright']) dx += 1;
+            
+            if (dx !== 0 || dy !== 0) {
+                const magnitude = Math.sqrt(dx * dx + dy * dy);
+                dx /= magnitude;
+                dy /= magnitude;
+                
+                player.x += dx * player.speed;
+                player.y += dy * player.speed;
+                
+                player.facing = Math.atan2(dy, dx);
+            }
+            
+            // Keep in bounds
+            player.x = Math.max(player.radius, Math.min(canvas.width - player.radius, player.x));
+            player.y = Math.max(player.radius + 50, Math.min(canvas.height - player.radius, player.y));
+            
+            // Update dodge
+            if (player.dodgeDuration > 0) {
+                player.dodgeDuration--;
+                if (player.dodgeDuration === 0) player.dodging = false;
+            }
+            if (player.dodgeCooldown > 0) player.dodgeCooldown--;
+        }
+        
+        function updateBoss() {
+            boss.attackTimer++;
+            boss.pulsePhase += 0.05;
+            
+            // Attack patterns
+            if (boss.attackTimer >= boss.attackCooldown) {
+                boss.attackTimer = 0;
+                bossAttack();
+            }
+            
+            // Phase transitions
+            if (boss.hp < boss.maxHp * 0.66 && boss.phase === 1) {
+                boss.phase = 2;
+                boss.attackCooldown = 100;
+                setTension(0.6);
+            }
+            if (boss.hp < boss.maxHp * 0.33 && boss.phase === 2) {
+                boss.phase = 3;
+                boss.attackCooldown = 80;
+                setTension(0.9);
+            }
+        }
+        
+        function bossAttack() {
+            const patterns = boss.phase;
+            
+            if (boss.phase === 1) {
+                // Slow spread
+                for (let i = 0; i < 5; i++) {
+                    const angle = (Math.PI * 2 / 5) * i + boss.pulsePhase;
+                    projectiles.push({
+                        x: boss.x,
+                        y: boss.y,
+                        vx: Math.cos(angle) * 2,
+                        vy: Math.sin(angle) * 2,
+                        radius: 6
+                    });
+                }
+            } else if (boss.phase === 2) {
+                // Aimed shots
+                const angle = Math.atan2(player.y - boss.y, player.x - boss.x);
+                for (let i = -1; i <= 1; i++) {
+                    const a = angle + i * 0.2;
+                    projectiles.push({
+                        x: boss.x,
+                        y: boss.y,
+                        vx: Math.cos(a) * 3.5,
+                        vy: Math.sin(a) * 3.5,
+                        radius: 7
+                    });
+                }
+            } else {
+                // Spiral + aimed
+                for (let i = 0; i < 8; i++) {
+                    const angle = (Math.PI * 2 / 8) * i + boss.pulsePhase * 2;
+                    projectiles.push({
+                        x: boss.x,
+                        y: boss.y,
+                        vx: Math.cos(angle) * 2.5,
+                        vy: Math.sin(angle) * 2.5,
+                        radius: 5
+                    });
+                }
+                const angle = Math.atan2(player.y - boss.y, player.x - boss.x);
+                projectiles.push({
+                    x: boss.x,
+                    y: boss.y,
+                    vx: Math.cos(angle) * 4,
+                    vy: Math.sin(angle) * 4,
+                    radius: 8
+                });
+            }
+        }
+        
+        function updateProjectiles() {
+            // Boss projectiles
+            for (let i = projectiles.length - 1; i >= 0; i--) {
+                const p = projectiles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                
+                // Check collision with player
+                if (!player.dodging) {
+                    const dist = Math.hypot(p.x - player.x, p.y - player.y);
+                    if (dist < p.radius + player.radius) {
+                        player.hp -= 15;
+                        projectiles.splice(i, 1);
+                        if (player.hp <= 0) {
+                            playerDeath();
+                        }
+                        continue;
+                    }
+                }
+                
+                // Remove if out of bounds
+                if (p.x < 0 || p.x > canvas.width || p.y < 0 || p.y > canvas.height) {
+                    projectiles.splice(i, 1);
+                }
+            }
+            
+            // Player attacks
+            for (let i = playerAttacks.length - 1; i >= 0; i--) {
+                const p = playerAttacks[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                
+                // Check collision with boss
+                const dist = Math.hypot(p.x - boss.x, p.y - boss.y);
+                if (dist < p.radius + boss.radius) {
+                    boss.hp -= 8;
+                    playerAttacks.splice(i, 1);
+                    if (boss.hp <= 0) {
+                        victory();
+                    }
+                    continue;
+                }
+                
+                // Remove if out of bounds
+                if (p.x < 0 || p.x > canvas.width || p.y < 0 || p.y > canvas.height) {
+                    playerAttacks.splice(i, 1);
+                }
+            }
+        }
+        
+        function playerDeath() {
+            gameState.phase = 'dead';
+            gameState.attempts++;
+            attemptsEl.textContent = gameState.attempts;
+            const text = defeatTexts[Math.min(gameState.attempts - 1, defeatTexts.length - 1)];
+            showNarrative(text);
+            setTension(0);
+        }
+        
+        function victory() {
+            gameState.phase = 'victory';
+            showNarrative("The seal breaks. You are free... for now.");
+            setTension(0);
+        }
+        
+        function reset() {
+            gameState.phase = 'start';
+            gameState.environmentVariant = (gameState.environmentVariant + 1) % 3;
+            
+            player.x = 400;
+            player.y = 500;
+            player.hp = player.maxHp;
+            player.dodging = false;
+            player.dodgeCooldown = 0;
+            player.dodgeDuration = 0;
+            
+            boss.x = 400;
+            boss.y = 150;
+            boss.hp = boss.maxHp;
+            boss.phase = 1;
+            boss.attackTimer = 0;
+            boss.attackCooldown = 120;
+            boss.pulsePhase = 0;
+            
+            projectiles = [];
+            playerAttacks = [];
+            
+            const narrativeIndex = Math.min(gameState.attempts, narratives.length - 1);
+            showNarrative(narratives[narrativeIndex]);
+            
+            setTension(0.1);
+        }
+        
+        function draw() {
+            // Clear
+            ctx.fillStyle = '#0f1419';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Environment changes based on attempts
+            const variant = gameState.environmentVariant;
+            ctx.strokeStyle = variant === 0 ? '#1a2332' : variant === 1 ? '#1a2832' : '#1a2132';
+            ctx.lineWidth = 2;
+            for (let i = 0; i < 5; i++) {
+                const y = 100 + i * 100;
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(canvas.width, y);
+                ctx.stroke();
+            }
+            
+            // Arena boundary glow
+            ctx.strokeStyle = 'rgba(60, 100, 140, 0.2)';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(10, 10, canvas.width - 20, canvas.height - 20);
+            
+            // Boss
+            const pulse = Math.sin(boss.pulsePhase) * 5;
+            const bossGlow = boss.phase === 1 ? 'rgba(200, 80, 80, 0.3)' : 
+                            boss.phase === 2 ? 'rgba(200, 100, 80, 0.4)' :
+                            'rgba(220, 60, 60, 0.5)';
+            ctx.fillStyle = bossGlow;
+            ctx.beginPath();
+            ctx.arc(boss.x, boss.y, boss.radius + 15 + pulse, 0, Math.PI * 2);
+            ctx.fill();
+            
+            ctx.fillStyle = '#c85050';
+            ctx.beginPath();
+            ctx.arc(boss.x, boss.y, boss.radius, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Boss HP
+            ctx.fillStyle = '#2a3a4a';
+            ctx.fillRect(boss.x - 60, boss.y - boss.radius - 20, 120, 8);
+            ctx.fillStyle = '#c85050';
+            ctx.fillRect(boss.x - 60, boss.y - boss.radius - 20, 120 * (boss.hp / boss.maxHp), 8);
+            
+            // Player
+            if (player.dodging) {
+                ctx.fillStyle = 'rgba(100, 150, 200, 0.3)';
+                ctx.beginPath();
+                ctx.arc(player.x, player.y, player.radius + 10, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            
+            ctx.fillStyle = player.dodging ? 'rgba(100, 150, 200, 0.6)' : '#6b9cc4';
+            ctx.beginPath();
+            ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Player facing indicator
+            ctx.strokeStyle = '#9bc4e4';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(player.x, player.y);
+            ctx.lineTo(player.x + Math.cos(player.facing) * 20, player.y + Math.sin(player.facing) * 20);
+            ctx.stroke();
+            
+            // Player HP
+            ctx.fillStyle = '#2a3a4a';
+            ctx.fillRect(20, canvas.height - 30, 200, 12);
+            ctx.fillStyle = '#6b9cc4';
+            ctx.fillRect(20, canvas.height - 30, 200 * (player.hp / player.maxHp), 12);
+            
+            // Projectiles
+            projectiles.forEach(p => {
+                ctx.fillStyle = 'rgba(200, 80, 80, 0.8)';
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.strokeStyle = 'rgba(255, 100, 100, 0.5)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            });
+            
+            playerAttacks.forEach(p => {
+                ctx.fillStyle = 'rgba(100, 150, 200, 0.8)';
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            
+            // Dodge cooldown indicator
+            if (player.dodgeCooldown > 0) {
+                const cooldownPercent = player.dodgeCooldown / 60;
+                ctx.fillStyle = '#2a3a4a';
+                ctx.fillRect(20, canvas.height - 50, 60, 8);
+                ctx.fillStyle = '#4a5c73';
+                ctx.fillRect(20, canvas.height - 50, 60 * (1 - cooldownPercent), 8);
+            }
+        }
+        
+        function gameLoop() {
+            if (gameState.phase === 'fighting') {
+                updatePlayer();
+                updateBoss();
+                updateProjectiles();
+            }
+            
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+        
+        // Initialize
+        reset();
+        gameLoop();
+    </script>
+</body>
+</html>
